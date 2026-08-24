@@ -1,0 +1,2 @@
+# Runtime deps are provided by the CommonLayer (aws-lambda-powertools, boto3).
+# Kept empty so `sam build` does not duplicate them into the function package.

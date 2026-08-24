@@ -1,0 +1,59 @@
+name: Deploy Prod
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r backend/tests/requirements-test.txt
+      - run: python -m pytest backend/tests/unit -v
+
+  deploy-backend:
+    needs: test-backend
+    runs-on: ubuntu-latest
+    environment: production # requires manual approval via GitHub Environments
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-2
+      - uses: aws-actions/setup-sam@v2
+      - name: sam build
+        working-directory: backend
+        run: sam build
+      - name: sam deploy (prod)
+        working-directory: backend
+        run: >
+          sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset
+          --parameter-overrides EnvName=prod AlertEmail=${{ secrets.ALERT_EMAIL }}
+      - name: Smoke test
+        run: bash scripts/smoke-test.sh prod
+
+  deploy-frontend:
+    needs: deploy-backend
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-2
+      - name: Deploy frontend
+        run: bash scripts/deploy-frontend.sh prod

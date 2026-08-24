@@ -1,0 +1,86 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #f7f7f9;
+  color: #1a1a1a;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 2rem;
+  background: #1f2a44;
+  color: white;
+}
+
+.topbar a {
+  color: white;
+  margin-right: 1rem;
+  text-decoration: none;
+}
+
+main {
+  padding: 2rem;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.workshop-grid {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+}
+
+.workshop-grid li {
+  background: white;
+  border-radius: 8px;
+  padding: 1rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.workshop-grid a {
+  text-decoration: none;
+  color: inherit;
+}
+
+.error {
+  color: #b00020;
+}
+
+.success {
+  color: #1b7a1b;
+}
+
+form label {
+  display: block;
+  margin-bottom: 0.75rem;
+}
+
+form input,
+form textarea,
+form select {
+  display: block;
+  width: 100%;
+  padding: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1.5rem;
+}
+
+table th,
+table td {
+  border-bottom: 1px solid #ddd;
+  padding: 0.5rem;
+  text-align: left;
+}

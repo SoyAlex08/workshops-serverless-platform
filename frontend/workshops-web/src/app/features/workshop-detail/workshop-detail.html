@@ -1,0 +1,31 @@
+@if (loading()) {
+  <p>Cargando...</p>
+} @else if (workshop()) {
+  <article class="workshop-detail">
+    <h1>{{ workshop()!.name }}</h1>
+    <p>{{ workshop()!.description }}</p>
+    <ul>
+      <li><strong>Categoría:</strong> {{ workshop()!.category }}</li>
+      <li><strong>Lugar:</strong> {{ workshop()!.location }}</li>
+      <li><strong>Cupo:</strong> {{ workshop()!.capacity }}</li>
+      <li><strong>Estado:</strong> {{ workshop()!.status }}</li>
+    </ul>
+
+    @if (auth.currentUser()) {
+      <button (click)="register()" [disabled]="registering() || workshop()!.status === 'cancelled'">
+        {{ registering() ? 'Inscribiendo...' : 'Inscribirme' }}
+      </button>
+    } @else {
+      <p>Inicia sesión para inscribirte.</p>
+    }
+
+    @if (registerMessage()) {
+      <p class="success">{{ registerMessage() }}</p>
+    }
+    @if (registerError()) {
+      <p class="error">{{ registerError() }}</p>
+    }
+  </article>
+} @else {
+  <p>Taller no encontrado.</p>
+}

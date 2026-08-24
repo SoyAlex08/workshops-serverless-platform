@@ -1,0 +1,20 @@
+<header class="topbar">
+  <nav>
+    <a routerLink="/workshops">Talleres</a>
+    @if (auth.isAdmin()) {
+      <a routerLink="/admin">Administración</a>
+    }
+  </nav>
+  <div class="session">
+    @if (auth.currentUser()) {
+      <span>{{ auth.currentUser()!.email }}</span>
+      <button (click)="logout()">Salir</button>
+    } @else {
+      <a routerLink="/login">Iniciar sesión</a>
+    }
+  </div>
+</header>
+
+<main>
+  <router-outlet />
+</main>

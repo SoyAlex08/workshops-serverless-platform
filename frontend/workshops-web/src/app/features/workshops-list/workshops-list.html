@@ -1,0 +1,21 @@
+<div class="workshops-page">
+  <h1>Talleres disponibles</h1>
+
+  @if (loading()) {
+    <p>Cargando...</p>
+  } @else if (error()) {
+    <p class="error">{{ error() }}</p>
+  } @else {
+    <ul class="workshop-grid">
+      @for (w of workshops(); track w.id) {
+        <li>
+          <a [routerLink]="['/workshops', w.id]">
+            <h2>{{ w.name }}</h2>
+            <p>{{ w.category }} · {{ w.location }}</p>
+            <p>Estado: {{ w.status }}</p>
+          </a>
+        </li>
+      }
+    </ul>
+  }
+</div>

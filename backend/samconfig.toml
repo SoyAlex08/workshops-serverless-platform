@@ -1,0 +1,23 @@
+version = 0.1
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[dev.deploy.parameters]
+stack_name = "workshops-dev"
+region = "us-east-2"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+parameter_overrides = "EnvName=dev AlertEmail=CHANGE_ME@example.com ApiThrottleRateLimit=50 ApiThrottleBurstLimit=100"
+tags = "Project=Workshops Env=dev"
+
+[prod.deploy.parameters]
+stack_name = "workshops-prod"
+region = "us-east-2"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+parameter_overrides = "EnvName=prod AlertEmail=CHANGE_ME@example.com ApiThrottleRateLimit=200 ApiThrottleBurstLimit=400"
+tags = "Project=Workshops Env=prod"

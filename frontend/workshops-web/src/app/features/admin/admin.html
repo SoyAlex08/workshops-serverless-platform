@@ -1,0 +1,55 @@
+<div class="admin-page">
+  <h1>Panel de administración de talleres</h1>
+
+  <form (ngSubmit)="save()" class="workshop-form">
+    <label>Nombre <input name="name" [(ngModel)]="form.name" required /></label>
+    <label>Descripción <textarea name="description" [(ngModel)]="form.description"></textarea></label>
+    <label>Categoría <input name="category" [(ngModel)]="form.category" required /></label>
+    <label>Lugar <input name="location" [(ngModel)]="form.location" required /></label>
+    <label>Inicio (epoch) <input type="number" name="startAt" [(ngModel)]="form.startAt" required /></label>
+    <label>Fin (epoch) <input type="number" name="endAt" [(ngModel)]="form.endAt" required /></label>
+    <label>Cupo <input type="number" name="capacity" [(ngModel)]="form.capacity" required /></label>
+    <label>
+      Estado
+      <select name="status" [(ngModel)]="form.status">
+        <option value="scheduled">scheduled</option>
+        <option value="cancelled">cancelled</option>
+      </select>
+    </label>
+
+    <div class="actions">
+      <button type="submit">{{ editingId() ? 'Actualizar' : 'Crear' }}</button>
+      @if (editingId()) {
+        <button type="button" (click)="resetForm()">Cancelar</button>
+      }
+    </div>
+
+    @if (error()) {
+      <p class="error">{{ error() }}</p>
+    }
+  </form>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Nombre</th>
+        <th>Categoría</th>
+        <th>Estado</th>
+        <th>Acciones</th>
+      </tr>
+    </thead>
+    <tbody>
+      @for (w of workshops(); track w.id) {
+        <tr>
+          <td>{{ w.name }}</td>
+          <td>{{ w.category }}</td>
+          <td>{{ w.status }}</td>
+          <td>
+            <button (click)="edit(w)">Editar</button>
+            <button (click)="remove(w)">Eliminar</button>
+          </td>
+        </tr>
+      }
+    </tbody>
+  </table>
+</div>

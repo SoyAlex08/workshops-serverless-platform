@@ -1,0 +1,7 @@
+backend/.aws-sam/
+backend/.venv-test/
+backend/.pytest_cache/
+backend/**/__pycache__/
+frontend/workshops-web/node_modules/
+frontend/workshops-web/dist/
+.DS_Store

@@ -1,0 +1,826 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Workshops platform - serverless backend (API Gateway + Lambda + DynamoDB +
+  Cognito + EventBridge + SNS + WAF + CloudWatch/X-Ray).
+
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+  AlertEmail:
+    Type: String
+    Description: Email address for CloudWatch alarms and budget alerts
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+  ApiThrottleRateLimit:
+    Type: Number
+    Default: 50
+  ApiThrottleBurstLimit:
+    Type: Number
+    Default: 100
+  CloudFrontWebAclArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of a WAFv2 WebACL (Scope=CLOUDFRONT) created in us-east-1 by waf-cloudfront.yaml.
+      Leave empty to deploy CloudFront without a WAF attached (e.g. before the us-east-1
+      stack exists).
+
+Conditions:
+  HasCloudFrontWebAcl: !Not [!Equals [!Ref CloudFrontWebAclArn, '']]
+
+Mappings:
+  EnvConfig:
+    dev:
+      MemorySize: 256
+      Timeout: 10
+      TracingLevel: Active
+    prod:
+      MemorySize: 512
+      Timeout: 15
+      TracingLevel: Active
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+    MemorySize: !FindInMap [EnvConfig, !Ref EnvName, MemorySize]
+    Timeout: !FindInMap [EnvConfig, !Ref EnvName, Timeout]
+    Tracing: !FindInMap [EnvConfig, !Ref EnvName, TracingLevel]
+    Layers:
+      - !Ref CommonLayer
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref WorkshopsTable
+        EVENT_BUS_NAME: !Ref WorkshopsEventBus
+        POWERTOOLS_SERVICE_NAME: workshops-api
+        LOG_LEVEL: INFO
+    Tags:
+      Project: Workshops
+      Env: !Ref EnvName
+  Api:
+    TracingEnabled: true
+    PropagateTags: true
+
+Resources:
+  # ---------------------------------------------------------------------
+  # DynamoDB single-table design
+  # ---------------------------------------------------------------------
+  WorkshopsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub workshops-${EnvName}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: N
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: N
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: Workshops
+        - Key: Env
+          Value: !Ref EnvName
+
+  # ---------------------------------------------------------------------
+  # Cognito - authentication
+  # ---------------------------------------------------------------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub workshops-users-${EnvName}
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      MfaConfiguration: 'OFF'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+
+  UserPoolAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      UserPoolId: !Ref UserPool
+      Description: Workshop administrators (full CRUD access)
+
+  UserPoolStudentGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: student
+      UserPoolId: !Ref UserPool
+      Description: Students who can browse and register for workshops
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub workshops-web-${EnvName}
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub workshops-${EnvName}-${AWS::AccountId}
+      UserPoolId: !Ref UserPool
+
+  # ---------------------------------------------------------------------
+  # EventBridge - domain events
+  # ---------------------------------------------------------------------
+  WorkshopsEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub workshops-bus-${EnvName}
+
+  NotificationsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub workshops-notifications-dlq-${EnvName}
+      MessageRetentionPeriod: 1209600 # 14 days
+      Tags:
+        - Key: Project
+          Value: Workshops
+        - Key: Env
+          Value: !Ref EnvName
+
+  NotificationsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub workshops-notify-${EnvName}
+      EventBusName: !Ref WorkshopsEventBus
+      EventPattern:
+        source: [workshops.api]
+        detail-type: [WORKSHOP_CREATED, STUDENT_REGISTERED, WORKSHOP_REMINDER, WORKSHOP_DELETED]
+      Targets:
+        - Id: NotificationFunctionTarget
+          Arn: !GetAtt NotificationFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt NotificationsDLQ.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 3
+            MaximumEventAgeInSeconds: 3600
+
+  NotificationsRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref NotificationFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NotificationsRule.Arn
+
+  # ---------------------------------------------------------------------
+  # SNS - notifications
+  # ---------------------------------------------------------------------
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub workshops-notifications-${EnvName}
+      Tags:
+        - Key: Project
+          Value: Workshops
+        - Key: Env
+          Value: !Ref EnvName
+
+  NotificationsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ---------------------------------------------------------------------
+  # EventBridge Scheduler - 24h reminders
+  # ---------------------------------------------------------------------
+  ReminderSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeSchedulerFunction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt SchedulerFunction.Arn
+
+  ReminderSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub workshops-reminder-check-${EnvName}
+      ScheduleExpression: rate(15 minutes)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt SchedulerFunction.Arn
+        RoleArn: !GetAtt ReminderSchedulerRole.Arn
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+
+  # ---------------------------------------------------------------------
+  # Lambda layer (shared deps: powertools, boto3 helpers)
+  # ---------------------------------------------------------------------
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub workshops-common-${EnvName}
+      ContentUri: src/layers/common/
+      CompatibleRuntimes: [python3.12]
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: python3.12
+
+  # ---------------------------------------------------------------------
+  # Lambda functions
+  # ---------------------------------------------------------------------
+  WorkshopsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub workshops-crud-${EnvName}
+      CodeUri: src/handlers/workshops/
+      Handler: app.route
+      AutoPublishAlias: live
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkshopsTable
+        - Statement:
+            - Effect: Allow
+              Action: events:PutEvents
+              Resource: !GetAtt WorkshopsEventBus.Arn
+      Events:
+        ListWorkshops:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopsApi
+            Path: /workshops
+            Method: GET
+            Auth:
+              Authorizer: NONE
+        CreateWorkshop:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopsApi
+            Path: /workshops
+            Method: POST
+        GetWorkshop:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopsApi
+            Path: /workshops/{id}
+            Method: GET
+            Auth:
+              Authorizer: NONE
+        UpdateWorkshop:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopsApi
+            Path: /workshops/{id}
+            Method: PUT
+        DeleteWorkshop:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopsApi
+            Path: /workshops/{id}
+            Method: DELETE
+
+  RegistrationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub workshops-registration-${EnvName}
+      CodeUri: src/handlers/registrations/
+      Handler: app.route
+      AutoPublishAlias: live
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkshopsTable
+        - Statement:
+            - Effect: Allow
+              Action: events:PutEvents
+              Resource: !GetAtt WorkshopsEventBus.Arn
+      Events:
+        Register:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopsApi
+            Path: /workshops/{id}/register
+            Method: POST
+
+  NotificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub workshops-notify-${EnvName}
+      CodeUri: src/handlers/notifications/
+      Handler: app.handler
+      Environment:
+        Variables:
+          NOTIFICATIONS_TOPIC_ARN: !Ref NotificationsTopic
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationsTopic.TopicName
+
+  SchedulerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub workshops-scheduler-${EnvName}
+      CodeUri: src/handlers/scheduler/
+      Handler: app.handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkshopsTable
+        - Statement:
+            - Effect: Allow
+              Action: events:PutEvents
+              Resource: !GetAtt WorkshopsEventBus.Arn
+
+  HealthzFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub workshops-healthz-${EnvName}
+      CodeUri: src/handlers/healthz/
+      Handler: app.handler
+      Events:
+        Healthz:
+          Type: Api
+          Properties:
+            RestApiId: !Ref WorkshopsApi
+            Path: /healthz
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
+  # ---------------------------------------------------------------------
+  # API Gateway (REST) with Cognito authorizer
+  # ---------------------------------------------------------------------
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/workshops-${EnvName}
+      RetentionInDays: !Ref LogRetentionDays
+
+  WorkshopsApi:
+    Type: AWS::Serverless::Api
+    DependsOn: ApiGatewayAccount
+    Properties:
+      Name: !Sub workshops-api-${EnvName}
+      StageName: !Ref EnvName
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","latency":"$context.responseLatency","error":"$context.error.message"}'
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          ThrottlingRateLimit: !Ref ApiThrottleRateLimit
+          ThrottlingBurstLimit: !Ref ApiThrottleBurstLimit
+          MetricsEnabled: true
+          LoggingLevel: INFO
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  # ---------------------------------------------------------------------
+  # WAF - protect the API
+  # ---------------------------------------------------------------------
+  ApiWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub workshops-api-waf-${EnvName}
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub workshops-api-waf-${EnvName}
+      Rules:
+        - Name: RateLimitRule
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRule
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: CommonRuleSet
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: SQLiRuleSet
+
+  ApiWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: WorkshopsApiStage
+    Properties:
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${WorkshopsApi}/stages/${EnvName}
+      WebACLArn: !GetAtt ApiWebAcl.Arn
+
+  # ---------------------------------------------------------------------
+  # Observability - alarms + dashboard
+  # ---------------------------------------------------------------------
+  AlarmsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub workshops-alarms-${EnvName}
+
+  AlarmsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub workshops-api-5xx-${EnvName}
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub workshops-api-${EnvName}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmsTopic]
+
+  WorkshopsFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub workshops-crud-errors-${EnvName}
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub workshops-crud-${EnvName}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmsTopic]
+
+  RegistrationFunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub workshops-registration-errors-${EnvName}
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub workshops-registration-${EnvName}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmsTopic]
+
+  DynamoThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub workshops-ddb-throttles-${EnvName}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+        - Name: TableName
+          Value: !Ref WorkshopsTable
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmsTopic]
+
+  NotificationsDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub workshops-notifications-dlq-${EnvName}
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt NotificationsDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmsTopic]
+
+  WorkshopsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub workshops-${EnvName}
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"title":"API requests / latency","metrics":[["AWS/ApiGateway","Count","ApiName","workshops-api-${EnvName}"],["AWS/ApiGateway","Latency","ApiName","workshops-api-${EnvName}"]],"period":300,"stat":"Average","region":"${AWS::Region}"}},
+            {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"API 4XX/5XX errors","metrics":[["AWS/ApiGateway","4XXError","ApiName","workshops-api-${EnvName}"],["AWS/ApiGateway","5XXError","ApiName","workshops-api-${EnvName}"]],"period":300,"stat":"Sum","region":"${AWS::Region}"}},
+            {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"title":"Lambda errors & duration","metrics":[["AWS/Lambda","Errors","FunctionName","workshops-crud-${EnvName}"],["AWS/Lambda","Duration","FunctionName","workshops-crud-${EnvName}"]],"period":300,"stat":"Average","region":"${AWS::Region}"}},
+            {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{"title":"DynamoDB consumed capacity","metrics":[["AWS/DynamoDB","ConsumedReadCapacityUnits","TableName","workshops-${EnvName}"],["AWS/DynamoDB","ConsumedWriteCapacityUnits","TableName","workshops-${EnvName}"]],"period":300,"stat":"Sum","region":"${AWS::Region}"}}
+          ]
+        }
+
+  # ---------------------------------------------------------------------
+  # Frontend hosting - S3 (private, OAC) + CloudFront
+  # ---------------------------------------------------------------------
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub workshops-frontend-${EnvName}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: Workshops
+        - Key: Env
+          Value: !Ref EnvName
+
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub workshops-evidence-${EnvName}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, PUT]
+            AllowedOrigins: ['*']
+            AllowedHeaders: ['*']
+      Tags:
+        - Key: Project
+          Value: Workshops
+        - Key: Env
+          Value: !Ref EnvName
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub workshops-oac-${EnvName}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        WebACLId: !If [HasCloudFrontWebAcl, !Ref CloudFrontWebAclArn, !Ref 'AWS::NoValue']
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+          - Id: ApiOrigin
+            DomainName: !Sub ${WorkshopsApi}.execute-api.${AWS::Region}.amazonaws.com
+            OriginPath: !Sub /${EnvName}
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # AWS Managed-CachingOptimized
+          Compress: true
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # AWS Managed-CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # AWS Managed-AllViewerExceptHostHeader
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+      Tags:
+        - Key: Project
+          Value: Workshops
+        - Key: Env
+          Value: !Ref EnvName
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+
+  # CloudFront's WAFv2 WebACL (Scope=CLOUDFRONT) must live in us-east-1 and is
+  # managed by the separate waf-cloudfront.yaml stack; its ARN is passed in via
+  # the CloudFrontWebAclArn parameter above.
+
+  # ---------------------------------------------------------------------
+  # Cost governance
+  # ---------------------------------------------------------------------
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub workshops-monthly-budget-${EnvName}
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: 50
+          Unit: USD
+        CostFilters:
+          TagKeyValue:
+            - !Sub user:Project$Workshops
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the Workshops API
+    Value: !Sub https://${WorkshopsApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvName}/
+  CloudFrontUrl:
+    Description: CloudFront distribution URL (serves frontend + /api/* proxy)
+    Value: !Sub https://${FrontendDistribution.DomainName}
+  FrontendBucketName:
+    Description: S3 bucket to upload the built Angular app to
+    Value: !Ref FrontendBucket
+  EvidenceBucketName:
+    Description: Private S3 bucket for workshop evidence/brochures (use presigned URLs)
+    Value: !Ref EvidenceBucket
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+  UserPoolDomain:
+    Description: Cognito Hosted UI domain
+    Value: !Sub ${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref WorkshopsTable
+  EventBusName:
+    Description: EventBridge custom bus name
+    Value: !Ref WorkshopsEventBus
+  NotificationsTopicArn:
+    Description: SNS topic for domain notifications
+    Value: !Ref NotificationsTopic
+  DashboardUrl:
+    Description: CloudWatch dashboard URL
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=workshops-${EnvName}

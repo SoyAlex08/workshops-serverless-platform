@@ -1,0 +1,108 @@
+openapi: 3.0.3
+info:
+  title: Workshops API
+  version: "1.0"
+  description: API para gestión de talleres de formación profesional.
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+  /workshops:
+    get:
+      summary: Listar talleres (público)
+      parameters:
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer }
+        - name: nextToken
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Lista de talleres
+    post:
+      summary: Crear taller (admin)
+      security: [{ cognito: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WorkshopInput" }
+      responses:
+        "201": { description: Creado }
+        "400": { description: Validación fallida, content: { application/problem+json: {} } }
+        "403": { description: Requiere rol admin, content: { application/problem+json: {} } }
+  /workshops/{id}:
+    get:
+      summary: Obtener taller por id (público)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+        "404": { description: No encontrado, content: { application/problem+json: {} } }
+    put:
+      summary: Actualizar taller (admin)
+      security: [{ cognito: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Actualizado }
+        "403": { description: Requiere rol admin }
+        "404": { description: No encontrado }
+    delete:
+      summary: Eliminar taller (admin)
+      security: [{ cognito: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Eliminado }
+        "403": { description: Requiere rol admin }
+        "404": { description: No encontrado }
+  /workshops/{id}/register:
+    post:
+      summary: Inscribirse a un taller (estudiante autenticado, idempotente)
+      security: [{ cognito: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "201": { description: Inscripción creada }
+        "401": { description: Requiere JWT válido }
+        "404": { description: Taller no encontrado }
+        "409": { description: Ya inscrito o taller cancelado }
+components:
+  securitySchemes:
+    cognito:
+      type: apiKey
+      in: header
+      name: Authorization
+  schemas:
+    WorkshopInput:
+      type: object
+      required: [name, category, location, startAt, endAt, capacity]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        location: { type: string }
+        startAt: { type: integer, description: "epoch seconds" }
+        endAt: { type: integer, description: "epoch seconds" }
+        status: { type: string, enum: [scheduled, cancelled] }
+        capacity: { type: integer }
