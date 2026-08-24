@@ -3,6 +3,8 @@
 Contrato completo en [`backend/openapi/openapi.yaml`](../backend/openapi/openapi.yaml) (OpenAPI 3.0).
 Colección Postman en [`docs/postman/workshops-api.postman_collection.json`](./postman/workshops-api.postman_collection.json).
 
+**Swagger UI navegable** (sin instalar nada): <https://claude.ai/code/artifact/3b43702e-0ae7-46c5-9dd8-1f19a05c0def>
+
 Base URL (dev): `https://jbd7ribj4i.execute-api.us-east-2.amazonaws.com/dev/`
 También accesible vía CloudFront: `https://d2n2d0u48cj4r6.cloudfront.net/api/*`
 

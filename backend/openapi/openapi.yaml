@@ -3,6 +3,11 @@ info:
   title: Workshops API
   version: "1.0"
   description: API para gestión de talleres de formación profesional.
+servers:
+  - url: https://jbd7ribj4i.execute-api.us-east-2.amazonaws.com/dev
+    description: Ambiente dev (us-east-2)
+  - url: https://d2n2d0u48cj4r6.cloudfront.net/api
+    description: Vía CloudFront (/api/*)
 paths:
   /healthz:
     get:
