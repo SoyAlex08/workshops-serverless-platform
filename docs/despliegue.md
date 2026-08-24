@@ -114,10 +114,40 @@ Verifica `GET /healthz` y `GET /workshops` contra la API desplegada.
 | Workflow | Trigger | Acción |
 |---|---|---|
 | `.github/workflows/ci.yml` | PR a `main`/`dev` | Tests backend (pytest), `sam validate --lint`, build+test frontend |
-| `.github/workflows/deploy-dev.yml` | Push a `dev` | Tests → `sam deploy` a `workshops-dev` → smoke test → deploy frontend |
-| `.github/workflows/deploy-prod.yml` | Tag `v*` | Igual que dev, pero con `environment: production` (aprobación manual en GitHub) |
+| `.github/workflows/deploy-dev.yml` | Push a `dev` | Solo tests backend (ver limitación abajo) |
+| `.github/workflows/deploy-prod.yml` | Tag `v*` | Solo tests backend (ver limitación abajo) |
 
-**Secrets requeridos** en el repo de GitHub: `AWS_DEPLOY_ROLE_ARN` (rol OIDC, no llaves estáticas), `ALERT_EMAIL`.
+### Limitación conocida: deploy automático a AWS deshabilitado
+
+Los workflows `deploy-dev.yml`/`deploy-prod.yml` originalmente incluían jobs que asumían un
+rol IAM vía OIDC (`aws-actions/configure-aws-credentials`) para ejecutar `sam deploy`
+directamente desde GitHub Actions. Al intentarlo contra la cuenta real:
+
+- Se creó el OIDC provider (`token.actions.githubusercontent.com`, ya existía en la cuenta),
+  un rol IAM (`workshops-github-actions-deploy`) con trust policy estándar
+  (`sub: repo:SoyAlex08/workshops-serverless-platform:*`, `aud: sts.amazonaws.com`), y su
+  policy de permisos.
+- El paso `Assuming role with OIDC` falla consistentemente con
+  `Not authorized to perform sts:AssumeRoleWithWebIdentity`, incluso tras recrear el rol
+  desde cero con un nombre distinto y verificar cada pieza (trust policy, `ClientIDList`
+  del provider, ausencia de permission boundary, ausencia de SCPs de Organizations).
+- La causa raíz no se identificó — es posible que el OIDC provider compartido (usado por
+  otros proyectos en la misma cuenta) tenga alguna configuración no visible vía
+  `aws iam get-open-id-connect-provider`, o que exista alguna restricción a nivel de cuenta
+  no diagnosticada.
+
+**Estado actual**: los workflows de `dev`/`prod` solo corren los tests unitarios del backend
+en cada push/tag; el deploy real a AWS se hace manualmente con
+`./scripts/deploy-backend.sh` y `./scripts/deploy-frontend.sh` (ver arriba), que es como se
+desplegó y verificó el stack `workshops-dev` real usado en `docs/evidencias.md`.
+
+**Para retomar el deploy automático**: el rol `workshops-github-actions-deploy` sigue
+existiendo en la cuenta (con su policy de permisos) por si se quiere continuar el
+diagnóstico — revisar en particular si GitHub requiere habilitar explícitamente
+"Read and write permissions" / OIDC en Settings → Actions → General, y si el problema persiste,
+probar creando un OIDC provider dedicado (no compartido) solo para este repo.
+
+**Secrets requeridos** cuando se reactive: `AWS_DEPLOY_ROLE_ARN` (rol OIDC, no llaves estáticas), `ALERT_EMAIL`.
 
 **Aprobación manual de prod**: configurar en GitHub → Settings → Environments → `production` → "Required reviewers".
 

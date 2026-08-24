@@ -1,12 +1,16 @@
 name: Deploy Dev
 
+# NOTE: automatic AWS deployment from CI is currently disabled. The OIDC
+# assume-role step (aws-actions/configure-aws-credentials) consistently fails
+# with "Not authorized to perform sts:AssumeRoleWithWebIdentity" even against
+# a freshly created, correctly-configured IAM role — the root cause wasn't
+# found (see docs/despliegue.md). Until resolved, this workflow only runs
+# tests; deploys are done manually via ./scripts/deploy-backend.sh and
+# ./scripts/deploy-frontend.sh (see docs/despliegue.md).
+
 on:
   push:
     branches: [dev]
-
-permissions:
-  id-token: write
-  contents: read
 
 jobs:
   test-backend:
@@ -20,67 +24,3 @@ jobs:
         run: pip install -r backend/tests/requirements-test.txt
       - name: Run unit tests
         run: python -m pytest backend/tests/unit -v
-
-  deploy-waf-cloudfront:
-    needs: test-backend
-    runs-on: ubuntu-latest
-    outputs:
-      waf-arn: ${{ steps.waf.outputs.arn }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-east-1
-      - uses: aws-actions/setup-sam@v2
-      - name: Deploy CloudFront WAF (us-east-1)
-        working-directory: backend
-        run: >
-          sam deploy --template-file waf-cloudfront.yaml
-          --stack-name workshops-waf-cloudfront-dev --region us-east-1
-          --parameter-overrides EnvName=dev
-          --resolve-s3 --capabilities CAPABILITY_IAM
-          --no-confirm-changeset --no-fail-on-empty-changeset
-      - name: Read WAF ARN output
-        id: waf
-        run: >
-          echo "arn=$(aws cloudformation describe-stacks --stack-name workshops-waf-cloudfront-dev
-          --region us-east-1 --query "Stacks[0].Outputs[?OutputKey=='WebAclArn'].OutputValue" --output text)"
-          >> "$GITHUB_OUTPUT"
-
-  deploy-backend:
-    needs: deploy-waf-cloudfront
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-east-2
-      - uses: aws-actions/setup-sam@v2
-      - name: sam build
-        working-directory: backend
-        run: sam build
-      - name: sam deploy (dev)
-        working-directory: backend
-        run: >
-          sam deploy --config-env dev --no-confirm-changeset --no-fail-on-empty-changeset
-          --parameter-overrides EnvName=dev AlertEmail=${{ secrets.ALERT_EMAIL }}
-          "CloudFrontWebAclArn=${{ needs.deploy-waf-cloudfront.outputs.waf-arn }}"
-      - name: Smoke test
-        run: bash scripts/smoke-test.sh dev
-
-  deploy-frontend:
-    needs: deploy-backend
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-east-2
-      - name: Deploy frontend
-        run: bash scripts/deploy-frontend.sh dev
