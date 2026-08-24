@@ -1,0 +1,113 @@
+{
+  "info": {
+    "name": "Workshops API",
+    "description": "Colección para la API de gestión de talleres de formación profesional.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://jbd7ribj4i.execute-api.us-east-2.amazonaws.com/dev" },
+    { "key": "idToken", "value": "" },
+    { "key": "workshopId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /healthz",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/healthz"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Workshops",
+      "item": [
+        {
+          "name": "List workshops",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/workshops?limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["workshops"],
+              "query": [{ "key": "limit", "value": "20" }]
+            }
+          }
+        },
+        {
+          "name": "List workshops by category",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/workshops?category=devops",
+              "host": ["{{baseUrl}}"],
+              "path": ["workshops"],
+              "query": [{ "key": "category", "value": "devops" }]
+            }
+          }
+        },
+        {
+          "name": "Get workshop by id",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/workshops/{{workshopId}}"
+          }
+        },
+        {
+          "name": "Create workshop (admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{idToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Taller de Terraform\",\n  \"description\": \"Introducción a IaC\",\n  \"category\": \"devops\",\n  \"location\": \"Panamá, sede central\",\n  \"startAt\": 1798000000,\n  \"endAt\": 1798007200,\n  \"capacity\": 25\n}"
+            },
+            "url": "{{baseUrl}}/workshops"
+          }
+        },
+        {
+          "name": "Update workshop (admin)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "{{idToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cancelled\"\n}"
+            },
+            "url": "{{baseUrl}}/workshops/{{workshopId}}"
+          }
+        },
+        {
+          "name": "Delete workshop (admin)",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "{{idToken}}" }],
+            "url": "{{baseUrl}}/workshops/{{workshopId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Registrations",
+      "item": [
+        {
+          "name": "Register for workshop (student)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "{{idToken}}" }],
+            "url": "{{baseUrl}}/workshops/{{workshopId}}/register"
+          }
+        }
+      ]
+    }
+  ]
+}

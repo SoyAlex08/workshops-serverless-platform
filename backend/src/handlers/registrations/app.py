@@ -54,5 +54,4 @@ def route(event, context):
     try:
         return register(event, context)
     except Exception as exc:  # noqa: BLE001
-        tracer.put_annotation("error", str(exc))
         return responses.server_error(str(exc))

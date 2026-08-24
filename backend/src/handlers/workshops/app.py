@@ -199,5 +199,4 @@ def route(event, context):
             return delete_workshop(event, context)
         return responses.not_found("Route not found")
     except Exception as exc:  # noqa: BLE001 - top-level Lambda handler boundary
-        tracer.put_annotation("error", str(exc))
         return responses.server_error(str(exc))
