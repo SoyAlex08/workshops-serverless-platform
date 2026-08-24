@@ -20,8 +20,36 @@ jobs:
       - run: pip install -r backend/tests/requirements-test.txt
       - run: python -m pytest backend/tests/unit -v
 
-  deploy-backend:
+  deploy-waf-cloudfront:
     needs: test-backend
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      waf-arn: ${{ steps.waf.outputs.arn }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: aws-actions/setup-sam@v2
+      - name: Deploy CloudFront WAF (us-east-1)
+        working-directory: backend
+        run: >
+          sam deploy --template-file waf-cloudfront.yaml
+          --stack-name workshops-waf-cloudfront-prod --region us-east-1
+          --parameter-overrides EnvName=prod
+          --resolve-s3 --capabilities CAPABILITY_IAM
+          --no-confirm-changeset --no-fail-on-empty-changeset
+      - name: Read WAF ARN output
+        id: waf
+        run: >
+          echo "arn=$(aws cloudformation describe-stacks --stack-name workshops-waf-cloudfront-prod
+          --region us-east-1 --query "Stacks[0].Outputs[?OutputKey=='WebAclArn'].OutputValue" --output text)"
+          >> "$GITHUB_OUTPUT"
+
+  deploy-backend:
+    needs: deploy-waf-cloudfront
     runs-on: ubuntu-latest
     environment: production # requires manual approval via GitHub Environments
     steps:
@@ -39,6 +67,7 @@ jobs:
         run: >
           sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset
           --parameter-overrides EnvName=prod AlertEmail=${{ secrets.ALERT_EMAIL }}
+          "CloudFrontWebAclArn=${{ needs.deploy-waf-cloudfront.outputs.waf-arn }}"
       - name: Smoke test
         run: bash scripts/smoke-test.sh prod
 

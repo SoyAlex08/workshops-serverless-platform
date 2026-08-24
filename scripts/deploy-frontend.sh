@@ -20,7 +20,7 @@ BUCKET=$(get_output FrontendBucketName)
 DISTRIBUTION_DOMAIN=$(get_output CloudFrontUrl)
 USER_POOL_ID=$(get_output UserPoolId)
 USER_POOL_CLIENT_ID=$(get_output UserPoolClientId)
-REGION=$(aws configure get region)
+REGION=$(echo "$API_URL" | sed -E 's#https://[^.]+\.execute-api\.([a-z0-9-]+)\.amazonaws\.com.*#\1#')
 
 ENV_FILE="frontend/workshops-web/src/environments/environment.prod.ts"
 cat > "$ENV_FILE" <<EOF
@@ -45,7 +45,7 @@ BUCKET_NAME="${BUCKET}"
 aws s3 sync dist/workshops-web/browser "s3://${BUCKET_NAME}" --delete
 
 DISTRIBUTION_ID=$(aws cloudfront list-distributions \
-  --query "DistributionList.Items[?Comment=='' && Origins.Items[?DomainName=='${BUCKET_NAME}.s3.amazonaws.com']] | [0].Id" \
+  --query "DistributionList.Items[?Origins.Items[?contains(DomainName, '${BUCKET_NAME}')]] | [0].Id" \
   --output text)
 
 if [[ -n "$DISTRIBUTION_ID" && "$DISTRIBUTION_ID" != "None" ]]; then
